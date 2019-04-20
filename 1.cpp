@@ -67,3 +67,51 @@ class Analyzer(catalog: Catalog,
       extendedResolutionRules : _*)
   )
 
+
+
+
+
+
+
+  /**
+   * Removes no-op Alias expressions from the plan.
+   */
+  object TrimGroupingAliases extends Rule[LogicalPlan] {
+    def apply(plan: LogicalPlan): LogicalPlan = plan transform {
+      case Aggregate(groups, aggs, child) =>
+        Aggregate(groups.map(_.transform { case Alias(c, _) => c }), aggs, child)
+    }
+  }
+
+  object ResolveGroupingAnalytics extends Rule[LogicalPlan] {
+    /**
+     * Extract attribute set according to the grouping id
+     * @param bitmask bitmask to represent the selected of the attribute sequence
+     * @param exprs the attributes in sequence
+     * @return the attributes of non selected specified via bitmask (with the bit set to 1)
+     */
+    private def buildNonSelectExprSet(bitmask: Int, exprs: Seq[Expression])
+    : OpenHashSet[Expression] = {
+      val set = new OpenHashSet[Expression](2)
+
+      var bit = exprs.length - 1
+      while (bit >= 0) {
+        if (((bitmask >> bit) & 1) == 0) set.add(exprs(bit))
+        bit -= 1
+      }
+
+      set
+    }
+
+    /*
+     *  GROUP BY a, b, c WITH ROLLUP
+     *  is equivalent to
+     *  GROUP BY a, b, c GROUPING SETS ( (a, b, c), (a, b), (a), ( ) ).
+     *  Group Count: N + 1 (N is the number of group expressions)
+     *
+     *  We need to get all of its subsets for the rule described above, the subset is
+     *  represented as the bit masks.
+     */
+    def bitmasks(r: Rollup): Seq[Int] = {
+      Seq.tabulate(r.groupByExprs.length + 1)(idx => {(1 << idx) - 1})
+    }
